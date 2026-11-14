@@ -85,7 +85,6 @@ function flag(country) {
 
 function statusOf(e) {
   const status = String(e.strStatus || '').toLowerCase();
-
   if (/live|in progress|half time|playing/.test(status)) return 'live';
   if (/finished|complete|full time/.test(status)) return 'finished';
   if (/postponed|cancelled|abandoned|suspended/.test(status)) return 'postponed';
@@ -116,7 +115,6 @@ function eventTime(e) {
 function scoreOf(e) {
   const home = e.intHomeScore;
   const away = e.intAwayScore;
-
   if (home === null || home === undefined ||
       away === null || away === undefined) return 'VS';
 
@@ -178,12 +176,12 @@ function renderTimeline(items) {
         const team = getValue(item, ['strTeam', 'strTeamName']);
         const assist = getValue(item, ['strAssist', 'strPlayer2']);
         const type = String(description).toLowerCase();
-
         let symbol = '•';
+
         if (/goal|but|penalty/.test(type)) symbol = '⚽';
         else if (/yellow|jaune/.test(type)) symbol = '🟨';
         else if (/red|rouge/.test(type)) symbol = '🟥';
-        else if (/substitution|substitution|replace/.test(type)) symbol = '🔄';
+        else if (/substitution|replace/.test(type)) symbol = '🔄';
 
         return `
           <div style="padding:9px 0">
@@ -219,6 +217,7 @@ function renderLineup(items) {
         const name = getValue(player, ['strPlayer', 'strPlayerName']) || 'Joueur';
         const position = getValue(player, ['strPosition', 'strPositionName']);
         const number = getValue(player, ['intSquadNumber', 'strNumber']);
+
         return `
           <div style="padding:5px 0;border-bottom:1px solid var(--border,#ddd)">
             ${number ? `#${safe(number)} ` : ''}
@@ -320,7 +319,6 @@ function render() {
           ${competitionLogo}
           <span>${safe(e.strLeague || 'Compétition non précisée')}</span>
         </div>
-
         <div style="display:flex;align-items:center;
           justify-content:space-around;gap:8px">
           ${teamCard(e.strHomeTeam, e.strHomeTeamBadge)}
@@ -328,7 +326,6 @@ function render() {
             text-align:center">${scoreOf(e)}</div>
           ${teamCard(e.strAwayTeam, e.strAwayTeamBadge)}
         </div>
-
         <div class="meta">
           <span>${flag(country)} ${safe(country)}</span>
           <span>${eventTime(e)} · ${statusLabel(e)}</span>
@@ -363,7 +360,6 @@ async function detail(id) {
   `;
 
   $('#detail').scrollIntoView({ behavior: 'smooth', block: 'start' });
-
   $('#closeDetail').addEventListener('click', () => {
     $('#detail').classList.add('hidden');
   });
@@ -371,18 +367,27 @@ async function detail(id) {
   let details = null;
   let detailError = false;
 
-  if (e.strTheSportsDBId) {
-    try {
-      const response = await fetch(
-        `/api/football?eventId=${encodeURIComponent(e.strTheSportsDBId)}`
-      );
+  try {
+    const params = new URLSearchParams({
+      home: e.strHomeTeam || '',
+      away: e.strAwayTeam || '',
+      date: e.dateEvent || state.date
+    });
 
-      if (!response.ok) throw new Error('Détails indisponibles');
-
-      details = await response.json();
-    } catch (error) {
-      detailError = true;
+    if (e.strTheSportsDBId) {
+      params.set('eventId', e.strTheSportsDBId);
     }
+
+    const response = await fetch(`/api/football?${params.toString()}`);
+
+    if (!response.ok) {
+      throw new Error('Détails indisponibles');
+    }
+
+    details = await response.json();
+
+  } catch (error) {
+    detailError = true;
   }
 
   const event = details?.event || e;
@@ -454,7 +459,10 @@ async function detail(id) {
     <p class="muted">
       Source : TheSportsDB
       ${detailError ? ' · La récupération des détails a échoué.' : ''}
-      ${!e.strTheSportsDBId ? ' · Aucun identifiant TheSportsDB associé à ce match.' : ''}
+      ${details?.message ? ` · ${safe(details.message)}` : ''}
+      ${!e.strTheSportsDBId && !details?.event
+        ? ' · Aucun identifiant TheSportsDB associé à ce match.'
+        : ''}
     </p>
   `;
 
@@ -486,7 +494,6 @@ $('#status').addEventListener('change', render);
 function shift(amount) {
   const date = new Date(`${state.date}T12:00:00`);
   date.setDate(date.getDate() + amount);
-
   state.date = date.toLocaleDateString('en-CA', {
     timeZone: 'Africa/Brazzaville'
   });
@@ -501,6 +508,4 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   });
 }
-
-
 
