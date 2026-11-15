@@ -597,3 +597,143 @@ footer {
     height: 29px;
   }
 }
+
+/* ==================================
+   PREDICT XI — MATCHS EN LIGNES
+   ================================== */
+
+.matches {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 0 !important;
+  overflow-x: auto;
+  width: 100%;
+}
+
+.matches-head,
+.match-row {
+  display: grid !important;
+  grid-template-columns: minmax(125px, 1.8fr) 62px 48px 42px 52px !important;
+  align-items: center !important;
+  gap: 5px !important;
+  width: 100% !important;
+  min-width: 350px !important;
+  box-sizing: border-box !important;
+}
+
+.matches-head {
+  position: sticky;
+  top: 0;
+  padding: 10px 5px !important;
+  color: #22d795 !important;
+  background: #080e19 !important;
+  border-bottom: 1px solid #29364b;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  text-align: center;
+}
+
+.match-row {
+  padding: 10px 5px !important;
+  margin: 0 !important;
+  min-height: 88px;
+  background: #111b2b !important;
+  border: 0 !important;
+  border-bottom: 1px solid #29364b !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  color: #fff !important;
+}
+
+.match-teams {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+  min-width: 0;
+}
+
+.match-league {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px !important;
+  color: #9aa9bd !important;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.match-team {
+  display: flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  min-width: 0;
+  font-size: 11px !important;
+  font-weight: 600;
+  color: #fff !important;
+}
+
+.match-team span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.match-team img {
+  width: 19px !important;
+  height: 19px !important;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.match-time {
+  font-size: 9px !important;
+  color: #8998ad !important;
+}
+
+.match-probs {
+  display: flex !important;
+  justify-content: space-around !important;
+  gap: 2px !important;
+  font-size: 10px !important;
+  color: #dce6f2 !important;
+}
+
+.match-pick,
+.match-odds,
+.match-result {
+  text-align: center !important;
+  font-size: 11px !important;
+  color: #fff !important;
+}
+
+.match-pick {
+  color: #22d795 !important;
+  font-weight: 800 !important;
+}
+
+.match-odds {
+  color: #22d795 !important;
+}
+
+.match-result strong {
+  display: block;
+  font-size: 14px !important;
+}
+
+.match-result small {
+  display: block;
+  font-size: 9px !important;
+  color: #9aa9bd !important;
+}
+
+@media (max-width: 390px) {
+  .matches-head,
+  .match-row {
+    grid-template-columns: minmax(112px, 1.7fr) 55px 40px 36px 45px !important;
+    gap: 3px !important;
+  }
+
+  .match-team {
+    font-size: 10px !important;
+  }
+}
