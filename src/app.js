@@ -84,10 +84,21 @@ function flag(country) {
 }
 
 function statusOf(e) {
-  const status = String(e.strStatus || '').toLowerCase();
-  if (/live|in progress|half time|playing/.test(status)) return 'live';
-  if (/finished|complete|full time/.test(status)) return 'finished';
-  if (/postponed|cancelled|abandoned|suspended/.test(status)) return 'postponed';
+  const status = String(
+    e.strStatusShort || e.strStatus || ''
+  ).toLowerCase();
+
+  if (/live|in progress|half time|playing|1h|2h|ht/.test(status)) {
+    return 'live';
+  }
+
+  if (/finished|complete|full time|ft|aet|pen/.test(status)) {
+    return 'finished';
+  }
+
+  if (/postponed|cancelled|abandoned|suspended/.test(status)) {
+    return 'postponed';
+  }
 
   if (
     e.intHomeScore !== null &&
@@ -109,12 +120,15 @@ function statusLabel(e) {
 
 function eventTime(e) {
   const t = String(e.strTime || '');
-  return /^\d{2}:\d{2}/.test(t) ? t.slice(0, 5) : 'Heure non communiquée';
+  return /^\d{2}:\d{2}/.test(t)
+    ? t.slice(0, 5)
+    : 'Heure non communiquée';
 }
 
 function scoreOf(e) {
   const home = e.intHomeScore;
   const away = e.intAwayScore;
+
   if (home === null || home === undefined ||
       away === null || away === undefined) return 'VS';
 
@@ -142,7 +156,9 @@ function section(title, content) {
 
 function getValue(obj, keys) {
   for (const key of keys) {
-    if (obj?.[key] !== undefined && obj[key] !== null && obj[key] !== '') {
+    if (obj?.[key] !== undefined &&
+        obj[key] !== null &&
+        obj[key] !== '') {
       return obj[key];
     }
   }
@@ -151,16 +167,26 @@ function getValue(obj, keys) {
 
 function eventDescription(item) {
   return getValue(item, [
-    'strTimeline', 'strEvent', 'strType',
-    'strDetail', 'strDescription', 'strPlayer'
+    'strDetail',
+    'strEvent',
+    'strType',
+    'strTimeline',
+    'strDescription',
+    'strPlayer'
   ]) || 'Événement';
 }
 
 function eventMinute(item) {
   const minute = getValue(item, [
-    'strTime', 'intTime', 'strMinute', 'intMinute'
+    'strTime',
+    'intTime',
+    'strMinute',
+    'intMinute'
   ]);
-  return minute ? `${minute}${String(minute).includes("'") ? '' : "'"}` : '';
+
+  return minute
+    ? `${minute}${String(minute).includes("'") ? '' : "'"}`
+    : '';
 }
 
 function renderTimeline(items) {
@@ -175,13 +201,17 @@ function renderTimeline(items) {
         const player = getValue(item, ['strPlayer', 'strPlayer1']);
         const team = getValue(item, ['strTeam', 'strTeamName']);
         const assist = getValue(item, ['strAssist', 'strPlayer2']);
-        const type = String(description).toLowerCase();
+        const type = String(
+          `${item.strType || ''} ${description}`
+        ).toLowerCase();
+
         let symbol = '•';
 
-        if (/goal|but|penalty/.test(type)) symbol = '⚽';
-        else if (/yellow|jaune/.test(type)) symbol = '🟨';
-        else if (/red|rouge/.test(type)) symbol = '🟥';
-        else if (/substitution|replace/.test(type)) symbol = '🔄';
+        if (/goal|but|penalty|own goal/.test(type)) symbol = '⚽';
+        else if (/yellow/.test(type)) symbol = '🟨';
+        else if (/red/.test(type)) symbol = '🟥';
+        else if (/substitution/.test(type)) symbol = '🔄';
+        else if (/var/.test(type)) symbol = '📺';
 
         return `
           <div style="padding:9px 0">
@@ -197,63 +227,149 @@ function renderTimeline(items) {
   `;
 }
 
+/* COMPOSITIONS API-FOOTBALL */
+
 function renderLineup(items) {
   if (!Array.isArray(items) || !items.length) {
     return '<p class="muted">Compositions non communiquées par la source.</p>';
   }
 
-  const teams = {};
+  return items.map(team => {
+    const name = team.team?.name || 'Équipe';
+    const players = team.startXI || [];
+    const substitutes = team.substitutes || [];
 
-  items.forEach(item => {
-    const team = getValue(item, ['strTeam', 'strTeamName']) || 'Équipe';
-    if (!teams[team]) teams[team] = [];
-    teams[team].push(item);
-  });
+    const renderPlayers = (list, title) => `
+      <div style="margin:12px 0">
+        <strong>${safe(title)}</strong>
+        ${list.length ? list.map(item => {
+          const p = item.player || {};
 
-  return Object.entries(teams).map(([team, players]) => `
-    <div style="margin-bottom:14px">
-      <strong>${safe(team)}</strong>
-      ${players.map(player => {
-        const name = getValue(player, ['strPlayer', 'strPlayerName']) || 'Joueur';
-        const position = getValue(player, ['strPosition', 'strPositionName']);
-        const number = getValue(player, ['intSquadNumber', 'strNumber']);
+          return `
+            <div style="padding:6px 0;border-bottom:1px solid var(--border,#ddd)">
+              ${p.number ? `#${safe(p.number)} ` : ''}
+              ${safe(p.name || 'Joueur non communiqué')}
+              ${p.pos ? `<small class="muted"> · ${safe(p.pos)}</small>` : ''}
+            </div>
+          `;
+        }).join('') : '<p class="muted">Non communiqué.</p>'}
+      </div>
+    `;
+
+    return `
+      <div style="margin-bottom:20px">
+        <h4>${safe(name)}</h4>
+        ${team.formation
+          ? `<p>Formation : ${safe(team.formation)}</p>`
+          : ''}
+        ${renderPlayers(players, 'Titulaires')}
+        ${renderPlayers(substitutes, 'Remplaçants')}
+      </div>
+    `;
+  }).join('');
+}
+
+/* STATISTIQUES API-FOOTBALL */
+
+function renderStatistics(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return '<p class="muted">Statistiques détaillées non communiquées par la source.</p>';
+  }
+
+  const home = items[0] || {};
+  const away = items[1] || {};
+
+  const homeStats = home.statistics || [];
+  const awayStats = away.statistics || [];
+
+  if (!homeStats.length && !awayStats.length) {
+    return '<p class="muted">Statistiques détaillées non communiquées par la source.</p>';
+  }
+
+  const getStat = (list, type) => {
+    const found = list.find(x => x.type === type);
+    return found?.value ?? '—';
+  };
+
+  const types = [
+    'Ball Possession',
+    'Total Shots',
+    'Shots on Goal',
+    'Shots off Goal',
+    'Blocked Shots',
+    'Corner Kicks',
+    'Fouls',
+    'Offsides',
+    'Yellow Cards',
+    'Red Cards',
+    'Goalkeeper Saves',
+    'Total passes',
+    'Passes accurate',
+    'Passes %'
+  ];
+
+  return `
+    <div style="overflow-x:auto">
+      <div style="display:flex;justify-content:space-between;
+        gap:8px;padding:8px 0;font-weight:bold">
+        <span>${safe(home.team?.name || 'Domicile')}</span>
+        <span>Statistique</span>
+        <span>${safe(away.team?.name || 'Extérieur')}</span>
+      </div>
+
+      ${types.map(type => {
+        const h = getStat(homeStats, type);
+        const a = getStat(awayStats, type);
+
+        if (h === '—' && a === '—') return '';
 
         return `
-          <div style="padding:5px 0;border-bottom:1px solid var(--border,#ddd)">
-            ${number ? `#${safe(number)} ` : ''}
-            ${safe(name)}
-            ${position ? `<small class="muted"> · ${safe(position)}</small>` : ''}
+          <div style="display:flex;justify-content:space-between;
+            gap:8px;padding:9px 0;border-bottom:1px solid var(--border,#ddd)">
+            <strong>${safe(h)}</strong>
+            <span style="text-align:center">${safe(type)}</span>
+            <strong>${safe(a)}</strong>
           </div>
         `;
       }).join('')}
     </div>
-  `).join('');
+  `;
 }
 
-function renderStatistics(items) {
-  if (Array.isArray(items) && items.length) {
-    return `
-      <div style="overflow-x:auto">
-        ${items.map(item => {
-          const name = getValue(item, ['strStat', 'strStatistic', 'strType', 'name']);
-          const home = getValue(item, ['intHome', 'strHome', 'home', 'value']);
-          const away = getValue(item, ['intAway', 'strAway', 'away']);
+/* BUTEURS À PARTIR DE LA CHRONOLOGIE */
 
-          return `
-            <div style="display:flex;justify-content:space-between;
-              gap:8px;padding:9px 0;border-bottom:1px solid var(--border,#ddd)">
-              <strong>${safe(home || '—')}</strong>
-              <span>${safe(name || 'Statistique')}</span>
-              <strong>${safe(away || '—')}</strong>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    `;
+function renderScorers(items, homeName, awayName) {
+  if (!Array.isArray(items)) items = [];
+
+  const goals = items.filter(item => {
+    const type = String(
+      `${item.strType || ''} ${item.strDetail || ''} ${item.strEvent || ''}`
+    ).toLowerCase();
+
+    return /goal|penalty/.test(type);
+  });
+
+  if (!goals.length) {
+    return '<p class="muted">Informations sur les buteurs non disponibles.</p>';
   }
 
-  return '<p class="muted">Statistiques détaillées non communiquées par la source.</p>';
+  return goals.map(item => {
+    const player = item.strPlayer || 'Buteur non communiqué';
+    const team = item.strTeam || '';
+    const assist = item.strAssist || '';
+
+    return `
+      <p>
+        ⚽ <strong>${safe(player)}</strong>
+        ${safe(eventMinute(item))}
+        ${team ? `<br><small>${safe(team)}</small>` : ''}
+        ${assist ? `<br><small>Passe décisive : ${safe(assist)}</small>` : ''}
+      </p>
+    `;
+  }).join('');
 }
+
+/* CHARGEMENT DES MATCHS */
 
 async function load() {
   $('#matchDate').value = state.date;
@@ -270,7 +386,7 @@ async function load() {
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.message || 'Source temporairement indisponible');
+      throw new Error(data.message || data.error || 'Source temporairement indisponible');
     }
 
     state.events = Array.isArray(data.events) ? data.events : [];
@@ -287,6 +403,8 @@ async function load() {
       `Impossible de charger les matchs : ${error.message}. Réessaie.`;
   }
 }
+
+/* AFFICHAGE DES MATCHS */
 
 function render() {
   const query = $('#search').value.trim().toLowerCase();
@@ -306,6 +424,7 @@ function render() {
 
   $('#matches').innerHTML = matches.map(e => {
     const country = e.strCountry || '';
+
     const competitionLogo = image(
       e.competition_logo || e.strLeagueBadge,
       e.strLeague,
@@ -319,13 +438,17 @@ function render() {
           ${competitionLogo}
           <span>${safe(e.strLeague || 'Compétition non précisée')}</span>
         </div>
+
         <div style="display:flex;align-items:center;
           justify-content:space-around;gap:8px">
           ${teamCard(e.strHomeTeam, e.strHomeTeamBadge)}
+
           <div class="score" style="font-weight:bold;min-width:55px;
             text-align:center">${scoreOf(e)}</div>
+
           ${teamCard(e.strAwayTeam, e.strAwayTeamBadge)}
         </div>
+
         <div class="meta">
           <span>${flag(country)} ${safe(country)}</span>
           <span>${eventTime(e)} · ${statusLabel(e)}</span>
@@ -346,6 +469,8 @@ function render() {
   });
 }
 
+/* DÉTAILS DU MATCH */
+
 async function detail(id) {
   const e = state.events.find(x => String(x.idEvent) === String(id));
   if (!e) return;
@@ -353,13 +478,18 @@ async function detail(id) {
   const country = e.strCountry || '';
 
   $('#detail').classList.remove('hidden');
+
   $('#detail').innerHTML = `
     <button class="back" id="closeDetail">← Retour aux matchs</button>
     <h3>Chargement des détails du match...</h3>
     <p class="muted">Recherche des événements et statistiques disponibles.</p>
   `;
 
-  $('#detail').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $('#detail').scrollIntoView({
+    behavior: 'smooth',
+    block: 'start'
+  });
+
   $('#closeDetail').addEventListener('click', () => {
     $('#detail').classList.add('hidden');
   });
@@ -374,8 +504,9 @@ async function detail(id) {
       date: e.dateEvent || state.date
     });
 
-    if (e.strTheSportsDBId) {
-      params.set('eventId', e.strTheSportsDBId);
+    /* ID du match API-FOOTBALL */
+    if (e.idEvent) {
+      params.set('eventId', e.idEvent);
     }
 
     const response = await fetch(`/api/football?${params.toString()}`);
@@ -386,6 +517,10 @@ async function detail(id) {
 
     details = await response.json();
 
+    if (details.error) {
+      throw new Error(details.error);
+    }
+
   } catch (error) {
     detailError = true;
   }
@@ -395,14 +530,16 @@ async function detail(id) {
   const lineup = details?.lineup || [];
   const statistics = details?.statistics || [];
 
-  const scorers = [
-    event.strHomeGoalDetails
-      ? `<p><strong>${safe(event.strHomeTeam || e.strHomeTeam)} :</strong> ${safe(event.strHomeGoalDetails)}</p>`
-      : '',
-    event.strAwayGoalDetails
-      ? `<p><strong>${safe(event.strAwayTeam || e.strAwayTeam)} :</strong> ${safe(event.strAwayGoalDetails)}</p>`
-      : ''
-  ].filter(Boolean).join('');
+  const scorers = renderScorers(
+    timeline,
+    e.strHomeTeam,
+    e.strAwayTeam
+  );
+
+  const cardsAndSubs = timeline.filter(item =>
+    /yellow|red|card|carton|substitution|replace|remplacement/i
+      .test(`${item.strType || ''} ${eventDescription(item)}`)
+  );
 
   const homeTeam = e.strHomeTeam || event.strHomeTeam;
   const awayTeam = e.strAwayTeam || event.strAwayTeam;
@@ -416,39 +553,65 @@ async function detail(id) {
 
     <div style="display:flex;justify-content:space-around;
       align-items:center;gap:8px;text-align:center;margin:20px 0">
+
       ${teamCard(homeTeam, e.strHomeTeamBadge || event.strHomeTeamBadge)}
+
       <div>
         <h2>${scoreOf(e)}</h2>
         <small>${statusLabel(e)}</small>
       </div>
+
       ${teamCard(awayTeam, e.strAwayTeamBadge || event.strAwayTeamBadge)}
     </div>
 
     <div class="facts">
-      <div class="fact"><small>Date</small>${safe(e.dateEvent || state.date)}</div>
-      <div class="fact"><small>Heure</small>${eventTime(e)}</div>
-      <div class="fact"><small>Stade</small>${safe(event.strVenue || e.strVenue || 'Non communiqué')}</div>
-      <div class="fact"><small>Statut</small>${statusLabel(e)}</div>
+      <div class="fact">
+        <small>Date</small>
+        ${safe(e.dateEvent || state.date)}
+      </div>
+
+      <div class="fact">
+        <small>Heure</small>
+        ${eventTime(e)}
+      </div>
+
+      <div class="fact">
+        <small>Stade</small>
+        ${safe(event.strVenue || e.strVenue || 'Non communiqué')}
+      </div>
+
+      <div class="fact">
+        <small>Statut</small>
+        ${statusLabel(e)}
+      </div>
     </div>
 
     ${section('⚽ Buteurs', scorers)}
 
-    ${section('📅 Chronologie des événements', renderTimeline(timeline))}
+    ${section(
+      '📅 Chronologie des événements',
+      renderTimeline(timeline)
+    )}
 
-    ${section('🟨 Cartons et remplacements',
-      timeline.length
-        ? renderTimeline(timeline.filter(item =>
-            /yellow|red|card|carton|substitution|replace|remplacement/i
-              .test(eventDescription(item))
-          ))
+    ${section(
+      '🟨 Cartons et remplacements',
+      cardsAndSubs.length
+        ? renderTimeline(cardsAndSubs)
         : '<p class="muted">Aucune information disponible.</p>'
     )}
 
-    ${section('👥 Compositions des équipes', renderLineup(lineup))}
+    ${section(
+      '👥 Compositions des équipes',
+      renderLineup(lineup)
+    )}
 
-    ${section('📊 Statistiques du match', renderStatistics(statistics))}
+    ${section(
+      '📊 Statistiques du match',
+      renderStatistics(statistics)
+    )}
 
-    ${section('🧠 Analyse PREDICT XI',
+    ${section(
+      '🧠 Analyse PREDICT XI',
       `<p class="muted">
         Les événements et statistiques disponibles sont présentés ci-dessus.
         Une analyse tactique et des conclusions automatiques seront ajoutées
@@ -457,12 +620,9 @@ async function detail(id) {
     )}
 
     <p class="muted">
-      Source : TheSportsDB
+      Source : ${safe(details?.source || e.source || 'API-Football')}
       ${detailError ? ' · La récupération des détails a échoué.' : ''}
-      ${details?.message ? ` · ${safe(details.message)}` : ''}
-      ${!e.strTheSportsDBId && !details?.event
-        ? ' · Aucun identifiant TheSportsDB associé à ce match.'
-        : ''}
+      ${details?.error ? ` · ${safe(details.error)}` : ''}
     </p>
   `;
 
@@ -470,6 +630,8 @@ async function detail(id) {
     $('#detail').classList.add('hidden');
   });
 }
+
+/* NAVIGATION ENTRE LES DATES */
 
 $('#matchDate').addEventListener('change', event => {
   if (event.target.value) {
@@ -485,6 +647,7 @@ $('#today').addEventListener('click', () => {
   state.date = new Date().toLocaleDateString('en-CA', {
     timeZone: 'Africa/Brazzaville'
   });
+
   load();
 });
 
@@ -494,6 +657,7 @@ $('#status').addEventListener('change', render);
 function shift(amount) {
   const date = new Date(`${state.date}T12:00:00`);
   date.setDate(date.getDate() + amount);
+
   state.date = date.toLocaleDateString('en-CA', {
     timeZone: 'Africa/Brazzaville'
   });
@@ -508,4 +672,5 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   });
 }
+
 
