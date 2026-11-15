@@ -406,6 +406,8 @@ async function load() {
 
 /* AFFICHAGE DES MATCHS */
 
+
+/* AFFICHAGE DES MATCHS — STYLE PREDICT XI */
 function render() {
   const query = $('#search').value.trim().toLowerCase();
   const filter = $('#status').value;
@@ -422,45 +424,68 @@ function render() {
       (filter === 'all' || statusOf(e) === filter);
   });
 
-  $('#matches').innerHTML = matches.map(e => {
-    const country = e.strCountry || '';
+  const header = `
+    <div class="matches-head">
+      <div>RENCONTRE</div>
+      <div>1 · N · 2</div>
+      <div>PRONO.</div>
+      <div>COEF.</div>
+      <div>SCORE</div>
+    </div>
+  `;
 
-    const competitionLogo = image(
-      e.competition_logo || e.strLeagueBadge,
-      e.strLeague,
-      22
-    );
+  const rows = matches.map(e => {
+    const country = e.strCountry || '';
+    const league = e.strLeague || 'Compétition non précisée';
 
     return `
-      <article class="match" data-id="${safe(e.idEvent)}">
-        <div style="display:flex;align-items:center;justify-content:center;
-          gap:8px;margin-bottom:12px">
-          ${competitionLogo}
-          <span>${safe(e.strLeague || 'Compétition non précisée')}</span>
+      <article class="match match-row"
+        data-id="${safe(e.idEvent || '')}">
+
+        <div class="match-teams">
+          <div class="match-league">
+            ${flag(country)}
+            <span>${safe(league)}</span>
+          </div>
+
+          <div class="match-team">
+            ${image(e.strHomeTeamBadge, e.strHomeTeam, 25)}
+            <span>${safe(e.strHomeTeam || 'Équipe inconnue')}</span>
+          </div>
+
+          <div class="match-team">
+            ${image(e.strAwayTeamBadge, e.strAwayTeam, 25)}
+            <span>${safe(e.strAwayTeam || 'Équipe inconnue')}</span>
+          </div>
+
+          <small class="match-time">
+            ${safe(e.dateEvent || state.date)}
+            · ${safe(eventTime(e))}
+          </small>
         </div>
 
-        <div style="display:flex;align-items:center;
-          justify-content:space-around;gap:8px">
-          ${teamCard(e.strHomeTeam, e.strHomeTeamBadge)}
-
-          <div class="score" style="font-weight:bold;min-width:55px;
-            text-align:center">${scoreOf(e)}</div>
-
-          ${teamCard(e.strAwayTeam, e.strAwayTeamBadge)}
+        <div class="match-probs">
+          <span>—</span>
+          <span>—</span>
+          <span>—</span>
         </div>
 
-        <div class="meta">
-          <span>${flag(country)} ${safe(country)}</span>
-          <span>${eventTime(e)} · ${statusLabel(e)}</span>
+        <div class="match-pick">—</div>
+
+        <div class="match-odds">—</div>
+
+        <div class="match-result">
+          <strong>${scoreOf(e)}</strong>
+          <small>${statusLabel(e)}</small>
         </div>
+
       </article>
     `;
   }).join('');
 
-  if (!matches.length) {
-    $('#matches').innerHTML =
-      '<p class="muted">Aucune rencontre pour cette recherche.</p>';
-  }
+  $('#matches').innerHTML = header + (
+    rows || '<p class="muted">Aucune rencontre pour cette recherche.</p>'
+  );
 
   document.querySelectorAll('.match').forEach(element => {
     element.addEventListener('click', () => {
@@ -468,6 +493,7 @@ function render() {
     });
   });
 }
+
 
 /* DÉTAILS DU MATCH */
 
