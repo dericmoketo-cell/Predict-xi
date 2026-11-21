@@ -1,5 +1,14 @@
-
 const API_BASE = "https://v3.football.api-sports.io";
+const TZ = "Africa/Brazzaville";
+
+/* Durée maximale de conservation d'une copie (7 jours) */
+const STORE_SECONDS = 7 * 24 * 3600;
+
+/* Durées de fraîcheur, en secondes */
+const TODAY_TTL = 600;        // aujourd'hui : 10 minutes
+const FUTURE_TTL = 10800;     // dates à venir : 3 heures
+const LIVE_DETAIL_TTL = 120;  // match en direct : 2 minutes
+const UPCOMING_DETAIL_TTL = 1800; // match à venir : 30 minutes
 
 const normalize = (value = "") =>
   String(value)
@@ -8,6 +17,81 @@ const normalize = (value = "") =>
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "");
 
+/* Erreur avec un type : rate (quota), plan (date non autorisée), http, api */
+class ApiError extends Error {
+  constructor(message, kind = "api") {
+    super(message);
+    this.kind = kind;
+  }
+}
+
+function friendlyMessage(error) {
+  if (error.kind === "rate") {
+    return "Limite de requêtes API-Football atteinte (quota gratuit). Réessaie plus tard.";
+  }
+  if (error.kind === "plan") {
+    return `La formule gratuite d'API-Football n'autorise pas cette date : ${error.message}`;
+  }
+  return "Source temporairement indisponible.";
+}
+
+const dayOf = ms =>
+  new Date(ms).toLocaleDateString("en-CA", { timeZone: TZ });
+
+/* ---------- MÉMOIRE (CACHE) ---------- */
+
+const cacheUrl = name => `https://predict-xi.cache/${name}`;
+
+async function cacheRead(name) {
+  try {
+    const response = await caches.default.match(cacheUrl(name));
+    return response ? await response.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheWrite(name, data) {
+  try {
+    const entry = { savedAt: Date.now(), data };
+    await caches.default.put(
+      cacheUrl(name),
+      new Response(JSON.stringify(entry), {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": `public, max-age=${STORE_SECONDS}`
+        }
+      })
+    );
+  } catch {
+    /* si la mémoire échoue, l'application continue de fonctionner */
+  }
+}
+
+function listIsFresh(entry, date) {
+  const today = dayOf(Date.now());
+  const age = (Date.now() - entry.savedAt) / 1000;
+
+  /* Jour passé : copie valable si elle a été faite après la fin de ce jour */
+  if (date < today) return dayOf(entry.savedAt) > date;
+  if (date === today) return age < TODAY_TTL;
+  return age < FUTURE_TTL;
+}
+
+const FINISHED = ["FT", "AET", "PEN"];
+const LIVE = ["1H", "HT", "2H", "ET", "BT", "P", "LIVE", "INT"];
+
+function detailIsFresh(entry) {
+  const short = entry.data?.event?.strStatusShort || "";
+  const age = (Date.now() - entry.savedAt) / 1000;
+
+  if (FINISHED.includes(short)) return true;
+  if (LIVE.includes(short)) return age < LIVE_DETAIL_TTL;
+  return age < UPCOMING_DETAIL_TTL;
+}
+
+/* ---------- API-FOOTBALL ---------- */
+
 async function apiFootball(path, key) {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
@@ -15,14 +99,29 @@ async function apiFootball(path, key) {
     }
   });
 
+  if (response.status === 429) {
+    throw new ApiError("API-Football : erreur HTTP 429", "rate");
+  }
+
   if (!response.ok) {
-    throw new Error(`API-Football : erreur HTTP ${response.status}`);
+    throw new ApiError(
+      `API-Football : erreur HTTP ${response.status}`,
+      "http"
+    );
   }
 
   const data = await response.json();
+  const errors = data.errors;
 
-  if (data.errors && Object.keys(data.errors).length) {
-    throw new Error(JSON.stringify(data.errors));
+  if (errors && Object.keys(errors).length) {
+    const kind =
+      errors.rateLimit || errors.requests ? "rate" :
+      errors.plan ? "plan" : "api";
+
+    const text = errors.plan || errors.rateLimit || errors.requests ||
+      JSON.stringify(errors);
+
+    throw new ApiError(String(text), kind);
   }
 
   return data.response || [];
@@ -56,6 +155,7 @@ function normalizeFixture(item) {
   };
 }
 
+/* Sources de secours : utilisées seulement en dernier recours */
 async function oldSources(date) {
   const results = await Promise.allSettled([
     fetch(
@@ -102,7 +202,23 @@ async function findFixture(params, key) {
 
   if (id && /^\d+$/.test(id)) {
     const result = await apiFootball(`/fixtures?id=${id}`, key);
-    return result[0] || null;
+    const fixture = result[0] || null;
+
+    /* Sécurité : l'identifiant doit correspondre aux équipes demandées.
+       Les matchs des sources de secours ont d'autres identifiants. */
+    const home = normalize(params.get("home") || "");
+    const away = normalize(params.get("away") || "");
+
+    if (fixture && home && away) {
+      const h = normalize(fixture.teams?.home?.name || "");
+      const a = normalize(fixture.teams?.away?.name || "");
+
+      if (!((h === home && a === away) || (h === away && a === home))) {
+        return null;
+      }
+    }
+
+    return fixture;
   }
 
   const date = params.get("date");
@@ -143,6 +259,8 @@ async function matchDetails(fixture, key) {
   const statistics =
     results[2].status === "fulfilled" ? results[2].value : [];
 
+  const failed = results.filter(r => r.status === "rejected");
+  const complete = failed.length === 0;
   const event = normalizeFixture(fixture);
 
   return {
@@ -166,15 +284,185 @@ async function matchDetails(fixture, key) {
       events: timeline.length > 0,
       lineups: lineups.length > 0,
       statistics: statistics.length > 0
-    }
+    },
+    complete,
+    warning: complete
+      ? ""
+      : friendlyMessage(failed[0].reason || new ApiError("", "api"))
   };
 }
 
-export async function onRequestGet({ request, env }) {
-  const url = new URL(request.url);
-  const params = url.searchParams;
-  const date = params.get("date");
+/* ---------- RÉPONSES ---------- */
 
+function errorResponse(error) {
+  const kind = error.kind || "api";
+
+  return Response.json(
+    {
+      error: "Impossible de charger les données football.",
+      message: friendlyMessage(error),
+      details: error.message,
+      kind
+    },
+    { status: kind === "rate" ? 429 : 502 }
+  );
+}
+
+async function handleDetail(params, key) {
+  const id = params.get("eventId");
+  const cacheName = id && /^\d+$/.test(id) ? `detail-${id}` : "";
+  const cached = cacheName ? await cacheRead(cacheName) : null;
+
+  if (cached && detailIsFresh(cached)) {
+    return Response.json({
+      ...cached.data,
+      cacheStatus: "cache",
+      savedAt: cached.savedAt
+    });
+  }
+
+  try {
+    const fixture = await findFixture(params, key);
+
+    if (!fixture) {
+      return Response.json({
+        source: "API-Football",
+        error: "Match introuvable dans API-Football.",
+        event: null,
+        timeline: [],
+        lineup: [],
+        statistics: [],
+        availability: {
+          events: false,
+          lineups: false,
+          statistics: false
+        }
+      });
+    }
+
+    const details = await matchDetails(fixture, key);
+
+    /* On ne mémorise que les réponses complètes */
+    if (details.complete) {
+      await cacheWrite(`detail-${fixture.fixture.id}`, details);
+    } else if (cached) {
+      return Response.json({
+        ...cached.data,
+        cacheStatus: "stale",
+        savedAt: cached.savedAt,
+        warning: details.warning
+      });
+    }
+
+    return Response.json({
+      ...details,
+      cacheStatus: "api",
+      savedAt: Date.now()
+    });
+  } catch (error) {
+    if (cached) {
+      return Response.json({
+        ...cached.data,
+        cacheStatus: "stale",
+        savedAt: cached.savedAt,
+        warning: friendlyMessage(error)
+      });
+    }
+
+    throw error;
+  }
+}
+
+async function handleList(date, key) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) {
+    return Response.json(
+      { message: "Date invalide. Format attendu : AAAA-MM-JJ." },
+      { status: 400 }
+    );
+  }
+
+  const cacheName = `list-${date}`;
+  const cached = await cacheRead(cacheName);
+
+  if (cached && listIsFresh(cached, date)) {
+    return Response.json({
+      ...cached.data,
+      cacheStatus: "cache",
+      savedAt: cached.savedAt
+    });
+  }
+
+  try {
+    const fixtures = await apiFootball(
+      `/fixtures?date=${date}`,
+      key
+    );
+
+    const body = {
+      sport: "football",
+      date,
+      count: fixtures.length,
+      source: "API-Football",
+      sources: {
+        apiFootball: true,
+        sportScore: false,
+        theSportsDB: false
+      },
+      events: fixtures.map(normalizeFixture)
+    };
+
+    await cacheWrite(cacheName, body);
+
+    return Response.json({
+      ...body,
+      cacheStatus: "api",
+      savedAt: Date.now()
+    });
+  } catch (apiError) {
+    /* 1) Priorité : la dernière copie complète d'API-Football */
+    if (cached) {
+      return Response.json({
+        ...cached.data,
+        cacheStatus: "stale",
+        savedAt: cached.savedAt,
+        warning: friendlyMessage(apiError)
+      });
+    }
+
+    /* 2) Dernier recours : sources de secours, marquées incomplètes */
+    let oldEvents = [];
+
+    try {
+      oldEvents = await oldSources(date);
+    } catch {
+      oldEvents = [];
+    }
+
+    if (oldEvents.length) {
+      return Response.json({
+        sport: "football",
+        date,
+        count: oldEvents.length,
+        source: "Sources de secours",
+        partial: true,
+        cacheStatus: "fallback",
+        sources: {
+          apiFootball: false,
+          sportScore: true,
+          theSportsDB: true
+        },
+        warning: friendlyMessage(apiError),
+        events: oldEvents
+      });
+    }
+
+    throw apiError;
+  }
+}
+
+export async function onRequestGet({ request, env }) {
+  const params = new URL(request.url).searchParams;
+  const date = params.get("date");
   const key = env.API_FOOTBALL_KEY;
 
   if (!key) {
@@ -188,81 +476,13 @@ export async function onRequestGet({ request, env }) {
     if (params.has("eventId") || (
       params.has("home") && params.has("away") && date
     )) {
-      const fixture = await findFixture(params, key);
-
-      if (!fixture) {
-        return Response.json({
-          source: "API-Football",
-          error: "Match introuvable dans API-Football.",
-          event: null,
-          timeline: [],
-          lineup: [],
-          statistics: [],
-          availability: {
-            events: false,
-            lineups: false,
-            statistics: false
-          }
-        });
-      }
-
-      return Response.json(await matchDetails(fixture, key));
+      return await handleDetail(params, key);
     }
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) {
-      return Response.json(
-        { message: "Date invalide. Format attendu : AAAA-MM-JJ." },
-        { status: 400 }
-      );
-    }
-
-    try {
-      const fixtures = await apiFootball(
-        `/fixtures?date=${date}`,
-        key
-      );
-
-      return Response.json({
-        sport: "football",
-        date,
-        count: fixtures.length,
-        source: "API-Football",
-        sources: {
-          apiFootball: true,
-          sportScore: false,
-          theSportsDB: false
-        },
-        events: fixtures.map(normalizeFixture)
-      });
-    } catch (apiError) {
-      const oldEvents = await oldSources(date);
-
-      if (oldEvents.length) {
-        return Response.json({
-          sport: "football",
-          date,
-          count: oldEvents.length,
-          source: "Sources de secours",
-          sources: {
-            apiFootball: false,
-            sportScore: true,
-            theSportsDB: true
-          },
-          warning: apiError.message,
-          events: oldEvents
-        });
-      }
-
-      throw apiError;
-    }
+    return await handleList(date, key);
   } catch (error) {
-    return Response.json(
-      {
-        error: "Impossible de charger les données football.",
-        details: error.message
-      },
-      { status: 502 }
-    );
+    return errorResponse(error);
   }
 }
+
 
