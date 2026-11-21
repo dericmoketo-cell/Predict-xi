@@ -49,6 +49,7 @@ const state = {
   events: [],
   days: readStore(),
   details: {},
+  open: {},
   date: dayOf(Date.now())
 };
 
@@ -569,10 +570,108 @@ async function load() {
   }
 }
 
-/* AFFICHAGE DES MATCHS */
+/* AFFICHAGE DES MATCHS — REGROUPÉS PAR COMPÉTITION */
 
+const norm = s =>
+  String(s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
 
-/* AFFICHAGE DES MATCHS — STYLE PREDICT XI */
+/* Compétitions affichées en premier (dans cet ordre).
+   Les noms doivent correspondre à ceux d'API-Football. */
+const PRIORITY = [
+  { name: 'uefachampionsleague', mode: 'has' },
+  { name: 'uefaeuropaleague', mode: 'has' },
+  { name: 'uefaeuropaconferenceleague', mode: 'has' },
+  { name: 'worldcup', mode: 'start' },
+  { name: 'africacupofnations', mode: 'has' },
+  { name: 'cafchampionsleague', mode: 'has' },
+  { name: 'cafconfederationcup', mode: 'has' },
+  { name: 'uefanationsleague', mode: 'has' },
+  { name: 'eurochampionship', mode: 'start' },
+  { name: 'premierleague', mode: 'exact', country: 'england' },
+  { name: 'laliga', mode: 'exact', country: 'spain' },
+  { name: 'seriea', mode: 'exact', country: 'italy' },
+  { name: 'bundesliga', mode: 'exact', country: 'germany' },
+  { name: 'ligue1', mode: 'exact', country: 'france' },
+  { name: 'primeiraliga', mode: 'exact', country: 'portugal' },
+  { name: 'eredivisie', mode: 'exact', country: 'netherlands' },
+  { name: 'copalibertadores', mode: 'has' },
+  { name: 'seriea', mode: 'exact', country: 'brazil' },
+  { name: 'majorleaguesoccer', mode: 'exact', country: 'usa' }
+];
+
+function priorityOf(e) {
+  const n = norm(e.strLeague);
+  const c = norm(e.strCountry);
+
+  for (let i = 0; i < PRIORITY.length; i++) {
+    const r = PRIORITY[i];
+
+    if (r.country && r.country !== c) continue;
+
+    const ok =
+      r.mode === 'exact' ? n === r.name :
+      r.mode === 'start' ? n.startsWith(r.name) :
+      n.includes(r.name);
+
+    if (ok) return i;
+  }
+
+  return 999;
+}
+
+function sortKey(e) {
+  const time = /^\d{2}:\d{2}/.test(e.strTime || '')
+    ? e.strTime.slice(0, 5)
+    : '99:99';
+
+  return `${e.dateEvent || ''} ${time}`;
+}
+
+function matchRow(e) {
+  return `
+    <article class="match match-row"
+      data-id="${safe(e.idEvent || '')}">
+
+      <div class="match-teams">
+        <div class="match-team">
+          ${image(e.strHomeTeamBadge, e.strHomeTeam, 25)}
+          <span>${safe(e.strHomeTeam || 'Équipe inconnue')}</span>
+        </div>
+
+        <div class="match-team">
+          ${image(e.strAwayTeamBadge, e.strAwayTeam, 25)}
+          <span>${safe(e.strAwayTeam || 'Équipe inconnue')}</span>
+        </div>
+
+        <small class="match-time">
+          ${safe(e.dateEvent || state.date)}
+          · ${safe(eventTime(e))}
+        </small>
+      </div>
+
+      <div class="match-probs">
+        <span>—</span>
+        <span>—</span>
+        <span>—</span>
+      </div>
+
+      <div class="match-pick">—</div>
+
+      <div class="match-odds">—</div>
+
+      <div class="match-result">
+        <strong>${scoreOf(e)}</strong>
+        <small>${statusLabel(e)}</small>
+      </div>
+
+    </article>
+  `;
+}
+
 function render() {
   const query = $('#search').value.trim().toLowerCase();
   const filter = $('#status').value;
@@ -599,66 +698,78 @@ function render() {
     </div>
   `;
 
-  const rows = matches.map(e => {
-    const country = e.strCountry || '';
-    const league = e.strLeague || 'Compétition non précisée';
+  if (!matches.length) {
+    $('#matches').innerHTML = header +
+      '<p class="muted">Aucune rencontre pour cette recherche.</p>';
+    return;
+  }
+
+  const groups = new Map();
+
+  matches.forEach(e => {
+    const key = `${e.strCountry || ''}|${e.strLeague || ''}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        league: e.strLeague || 'Compétition non précisée',
+        country: e.strCountry || '',
+        rank: priorityOf(e),
+        items: []
+      });
+    }
+
+    groups.get(key).items.push(e);
+  });
+
+  const list = [...groups.values()].sort((a, b) =>
+    a.rank - b.rank ||
+    a.country.localeCompare(b.country) ||
+    a.league.localeCompare(b.league)
+  );
+
+  const html = list.map(g => {
+    g.items.sort((a, b) => {
+      const x = sortKey(a);
+      const y = sortKey(b);
+      return x < y ? -1 : x > y ? 1 : 0;
+    });
+
+    const liveCount = g.items.filter(e => statusOf(e) === 'live').length;
+
+    const isOpen = query
+      ? true
+      : (g.key in state.open
+          ? state.open[g.key]
+          : (g.rank < 999 || liveCount > 0));
+
+    const headStyle =
+      'width:100%;min-width:350px;display:flex;align-items:center;' +
+      'justify-content:space-between;gap:8px;text-align:left;' +
+      'background:#0f1a2b;color:#fff;border:0;' +
+      'border-bottom:1px solid #29364b;border-left:3px solid #22d795;' +
+      'border-radius:0;padding:11px 10px;font-size:12px;font-weight:700';
 
     return `
-      <article class="match match-row"
-        data-id="${safe(e.idEvent || '')}">
-
-        <div class="match-teams">
-          <div class="match-league">
-            ${flag(country)}
-            <span>${safe(league)}</span>
-          </div>
-
-          <div class="match-team">
-            ${image(e.strHomeTeamBadge, e.strHomeTeam, 25)}
-            <span>${safe(e.strHomeTeam || 'Équipe inconnue')}</span>
-          </div>
-
-          <div class="match-team">
-            ${image(e.strAwayTeamBadge, e.strAwayTeam, 25)}
-            <span>${safe(e.strAwayTeam || 'Équipe inconnue')}</span>
-          </div>
-
-          <small class="match-time">
-            ${safe(e.dateEvent || state.date)}
-            · ${safe(eventTime(e))}
-          </small>
-        </div>
-
-        <div class="match-probs">
-          <span>—</span>
-          <span>—</span>
-          <span>—</span>
-        </div>
-
-        <div class="match-pick">—</div>
-
-        <div class="match-odds">—</div>
-
-        <div class="match-result">
-          <strong>${scoreOf(e)}</strong>
-          <small>${statusLabel(e)}</small>
-        </div>
-
-      </article>
+      <button class="group-head" type="button"
+        data-group="${safe(g.key)}" style="${headStyle}">
+        <span>
+          ${flag(g.country)} ${safe(g.league)}
+          ${g.country
+            ? `<small class="muted"> · ${safe(g.country)}</small>`
+            : ''}
+        </span>
+        <span style="white-space:nowrap;font-weight:600">
+          ${liveCount ? `🔴 ${liveCount} · ` : ''}${g.items.length}
+          ${isOpen ? '▾' : '▸'}
+        </span>
+      </button>
+      ${isOpen ? g.items.map(matchRow).join('') : ''}
     `;
   }).join('');
 
-  $('#matches').innerHTML = header + (
-    rows || '<p class="muted">Aucune rencontre pour cette recherche.</p>'
-  );
-
-  document.querySelectorAll('.match').forEach(element => {
-    element.addEventListener('click', () => {
-      detail(element.dataset.id);
-    });
-  });
+  $('#matches').innerHTML = header + html;
 }
-
 
 /* DÉTAILS DU MATCH */
 
@@ -870,6 +981,35 @@ $('#today').addEventListener('click', () => {
   load();
 });
 
+/* Un seul écouteur pour les groupes et les matchs */
+$('#matches').addEventListener('click', event => {
+  const head = event.target.closest('.group-head');
+
+  if (head) {
+    const key = head.dataset.group;
+    const query = $('#search').value.trim();
+
+    if (!query) {
+      const current = key in state.open
+        ? state.open[key]
+        : null;
+
+      /* Si l'état n'a jamais été choisi, on le déduit de l'affichage */
+      const wasOpen = current === null
+        ? head.textContent.includes('▾')
+        : current;
+
+      state.open[key] = !wasOpen;
+      render();
+    }
+
+    return;
+  }
+
+  const row = event.target.closest('.match');
+  if (row) detail(row.dataset.id);
+});
+
 $('#search').addEventListener('input', render);
 $('#status').addEventListener('change', render);
 
@@ -891,6 +1031,7 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   });
 }
+
 
 
 
