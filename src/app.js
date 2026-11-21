@@ -14,7 +14,7 @@ const hhmm = ms =>
 
 /* ---------- MÉMOIRE DU TÉLÉPHONE (matchs par date) ---------- */
 
-const STORE_KEY = 'predict-xi-days-v1';
+const STORE_KEY = 'predict-xi-days-v2';
 const MAX_SAVED_DAYS = 6;
 
 function readStore() {
@@ -50,6 +50,9 @@ const state = {
   days: readStore(),
   details: {},
   open: {},
+  standings: {},
+  view: null,
+  tab: 'avant',
   date: dayOf(Date.now())
 };
 
@@ -213,10 +216,24 @@ function statusLabel(e) {
 }
 
 function eventTime(e) {
-  const t = String(e.strTime || '');
-  return /^\d{2}:\d{2}/.test(t)
-    ? t.slice(0, 5)
-    : 'Heure non communiquée';
+  const k = kickoffMs(e);
+  if (k === null) return 'Heure non communiquée';
+
+  /* Déjà à l'heure de Brazzaville (demandée à l'API) */
+  if (e.strTimezone === TZ) return String(e.strTime).slice(0, 5);
+
+  return new Date(k).toLocaleTimeString('fr-FR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: TZ
+  });
+}
+
+function eventDate(e) {
+  const k = kickoffMs(e);
+  if (k === null) return e.dateEvent || state.date;
+  if (e.strTimezone === TZ) return e.dateEvent;
+  return dayOf(k);
 }
 
 function scoreOf(e) {
@@ -470,7 +487,7 @@ async function load() {
   const token = ++loadToken;
 
   $('#matchDate').value = date;
-  $('#detail').classList.add('hidden');
+  hideDetailPanel();
 
   const cached = state.days[date];
 
@@ -607,6 +624,9 @@ function priorityOf(e) {
   const n = norm(e.strLeague);
   const c = norm(e.strCountry);
 
+  /* Jeunes (U17, U19, U20, U21...) et féminines : pas mis en avant */
+  if (/u1\d|u2\d|women|feminin|femenin/.test(n)) return 999;
+
   for (let i = 0; i < PRIORITY.length; i++) {
     const r = PRIORITY[i];
 
@@ -624,11 +644,8 @@ function priorityOf(e) {
 }
 
 function sortKey(e) {
-  const time = /^\d{2}:\d{2}/.test(e.strTime || '')
-    ? e.strTime.slice(0, 5)
-    : '99:99';
-
-  return `${e.dateEvent || ''} ${time}`;
+  const k = kickoffMs(e);
+  return k === null ? 9e15 : k;
 }
 
 function matchRow(e) {
@@ -648,7 +665,7 @@ function matchRow(e) {
         </div>
 
         <small class="match-time">
-          ${safe(e.dateEvent || state.date)}
+          ${safe(eventDate(e))}
           · ${safe(eventTime(e))}
         </small>
       </div>
@@ -771,41 +788,556 @@ function render() {
   $('#matches').innerHTML = header + html;
 }
 
+/* DÉTAILS DU MATCH — panneau plein écran */
+
+function showDetailPanel() {
+  const d = $('#detail');
+
+  d.classList.remove('hidden');
+
+  Object.assign(d.style, {
+    position: 'fixed',
+    top: '0',
+    left: '0',
+    right: '0',
+    bottom: '0',
+    zIndex: '50',
+    overflowY: 'auto',
+    margin: '0',
+    border: '0',
+    borderRadius: '0',
+    background: '#080e19',
+    padding:
+      'calc(10px + env(safe-area-inset-top, 0px)) 14px ' +
+      'calc(40px + env(safe-area-inset-bottom, 0px))'
+  });
+
+  d.scrollTop = 0;
+  document.body.style.overflow = 'hidden';
+}
+
+function hideDetailPanel() {
+  $('#detail').classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
 /* DÉTAILS DU MATCH */
+
+let detailToken = 0;
+
+const BACK_BUTTON =
+  '<button class="back" id="closeDetail" style="position:sticky;top:0;' +
+  'z-index:3;display:block;width:100%;text-align:left;background:#080e19;' +
+  'padding:12px 0;font-size:15px">← Retour aux matchs</button>';
+
+/* Heure de début réelle du match (en millisecondes) */
+function kickoffMs(e) {
+  if (e.isoDate) {
+    const ms = Date.parse(e.isoDate);
+    if (!Number.isNaN(ms)) return ms;
+  }
+
+  const t = String(e.strTime || '');
+  if (!e.dateEvent || !/^\d{2}:\d{2}/.test(t)) return null;
+
+  /* Sources de secours : heure universelle */
+  const ms = Date.parse(`${e.dateEvent}T${t.slice(0, 5)}:00Z`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+const TOO_EARLY_MS = 2 * 60 * 60 * 1000;
+
+/* Message adapté quand une rubrique est vide */
+function emptyNote(phase, kind, failed) {
+  let text;
+
+  if (failed) {
+    text = 'Données non chargées (voir le message en bas de page).';
+  } else if (phase === 'upcoming') {
+    text = kind === 'lineup'
+      ? "Pas encore publiées. Selon la documentation d'API-Football, les compositions arrivent environ 20 à 40 minutes avant le coup d'envoi, si la compétition est couverte."
+      : 'Disponible une fois le match commencé.';
+  } else if (phase === 'postponed') {
+    text = 'Match reporté ou interrompu : aucune donnée.';
+  } else if (phase === 'live') {
+    text = "Rien de communiqué pour l'instant. Fermez puis rouvrez ce match dans quelques minutes pour actualiser.";
+  } else {
+    text = 'Non communiqué par la source pour cette compétition.';
+  }
+
+  return `<p class="muted">${safe(text)}</p>`;
+}
+
+function startText(e, phase) {
+  const k = kickoffMs(e);
+  if (phase !== 'upcoming' || k === null) return '';
+
+  const diff = k - Date.now();
+  if (diff <= 0) return "Coup d'envoi imminent";
+
+  const total = Math.round(diff / 60000);
+  const days = Math.floor(total / 1440);
+  const hours = Math.floor((total % 1440) / 60);
+  const mins = total % 60;
+
+  return "Coup d'envoi dans " + [
+    days ? `${days} j` : '',
+    hours ? `${hours} h` : '',
+    `${mins} min`
+  ].filter(Boolean).join(' ');
+}
+
+const pairText = p =>
+  p && p.home != null && p.away != null ? `${p.home} – ${p.away}` : '';
+
+function factItem(label, value) {
+  return value
+    ? `<div class="fact"><small>${safe(label)}</small>${safe(value)}</div>`
+    : '';
+}
+
+/* Informations du match : affichées seulement si la source les fournit */
+function factsHtml(shown, e) {
+  const round = String(shown.strRound || e.strRound || '')
+    .replace(/^Regular Season - /, 'Journée ');
+
+  const live = ['1H', '2H', 'ET'].includes(shown.strStatusShort) &&
+    shown.intElapsed != null;
+
+  return [
+    factItem('Date', eventDate(e)),
+    factItem('Heure (Brazzaville)', eventTime(e)),
+    factItem('Stade', shown.strVenue || e.strVenue || 'Non communiqué'),
+    factItem('Ville', shown.strCity || e.strCity),
+    factItem('Arbitre', shown.strReferee || e.strReferee),
+    factItem('Journée / tour', round),
+    factItem('Statut', statusLabel(shown)),
+    factItem('Minute', live ? `${shown.intElapsed}'` : ''),
+    factItem('Mi-temps', pairText(shown.halftime)),
+    factItem('Prolongation', pairText(shown.extratime)),
+    factItem('Tirs au but', pairText(shown.penalty))
+  ].join('');
+}
+
+function headerHtml(e, shown, phase) {
+  const k = kickoffMs(e);
+
+  const dateText = k !== null
+    ? new Date(k).toLocaleDateString('fr-FR', {
+        day: 'numeric',
+        month: 'long',
+        timeZone: TZ
+      })
+    : '';
+
+  let center;
+
+  if (phase === 'upcoming' || phase === 'postponed') {
+    center = `
+      <div style="font-size:30px;font-weight:900">${safe(eventTime(e))}</div>
+      <small>${safe(dateText)}</small><br>
+      <small class="muted">${safe(startText(e, phase) || statusLabel(shown))}</small>
+    `;
+  } else {
+    center = `
+      <h2>${scoreOf(shown)}</h2>
+      <small>${statusLabel(shown)}</small>
+    `;
+  }
+
+  return `
+    <div style="display:flex;justify-content:space-around;
+      align-items:center;gap:8px;text-align:center;margin:18px 0">
+
+      ${teamCard(e.strHomeTeam || shown.strHomeTeam,
+        e.strHomeTeamBadge || shown.strHomeTeamBadge)}
+
+      <div>${center}</div>
+
+      ${teamCard(e.strAwayTeam || shown.strAwayTeam,
+        e.strAwayTeamBadge || shown.strAwayTeamBadge)}
+    </div>
+  `;
+}
+
+/* ---------- Compositions sur le terrain ---------- */
+
+const playerPhoto = id =>
+  `https://media.api-sports.io/football/players/${encodeURIComponent(id)}.png`;
+
+function pitchPlayer(p, x, y) {
+  const shortName = String(p.name || '').trim().split(' ').pop();
+
+  return `
+    <div class="pitch-player" style="left:${x}%;top:${y}%">
+      ${p.id
+        ? `<img src="${safe(playerPhoto(p.id))}" alt="" loading="lazy"
+             onerror="this.style.visibility='hidden'">`
+        : '<span style="display:block;width:34px;height:34px;margin:0 auto 3px"></span>'}
+      <span class="player-number">${safe(p.number ?? '')}</span>
+      ${safe(shortName)}
+    </div>
+  `;
+}
+
+function pitchHtml(team) {
+  const start = team.startXI || [];
+  if (!start.length) return '';
+
+  const rows = {};
+
+  for (const item of start) {
+    const p = item.player || {};
+    const m = String(p.grid || '').match(/^(\d+):(\d+)$/);
+    if (!m) return '';
+    (rows[m[1]] ||= []).push({ p, col: Number(m[2]) });
+  }
+
+  const keys = Object.keys(rows).map(Number).sort((a, b) => a - b);
+  const count = keys.length;
+
+  const dots = keys.map((row, i) => {
+    const list = rows[row].sort((a, b) => a.col - b.col);
+    const y = count === 1 ? 50 : 88 - i * (78 / (count - 1));
+
+    return list.map((item, j) =>
+      pitchPlayer(item.p, ((j + 1) / (list.length + 1)) * 100, y)
+    ).join('');
+  }).join('');
+
+  return `<div class="pitch">${dots}</div>`;
+}
+
+function lineupTab(lineup, phase, failed) {
+  if (!lineup.length) return emptyNote(phase, 'lineup', failed);
+
+  return lineup.map(team => {
+    const pitch = pitchHtml(team);
+
+    if (!pitch) return renderLineup([team]);
+
+    const subs = team.substitutes || [];
+
+    return `
+      <div style="margin-bottom:26px">
+        <h4 style="display:flex;justify-content:space-between;gap:8px">
+          <span>${safe(team.team?.name || 'Équipe')}</span>
+          <span class="muted">${safe(team.formation || '')}</span>
+        </h4>
+        ${team.coach?.name
+          ? `<p class="muted">Entraîneur : ${safe(team.coach.name)}</p>`
+          : ''}
+        ${pitch}
+        ${subs.length ? `
+          <strong>Remplaçants</strong>
+          <div class="substitutes" style="margin-top:8px">
+            ${subs.map(item => {
+              const p = item.player || {};
+
+              return `
+                <div class="substitute">
+                  ${p.id
+                    ? `<img src="${safe(playerPhoto(p.id))}" alt="" loading="lazy"
+                         onerror="this.style.visibility='hidden'">`
+                    : ''}
+                  <span>
+                    ${p.number ? `#${safe(p.number)} ` : ''}${safe(p.name || '')}
+                  </span>
+                </div>
+              `;
+            }).join('')}
+          </div>` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+/* ---------- Événements ---------- */
+
+function eventsTab(shown, timeline, phase, failed) {
+  const goalless = phase === 'finished' &&
+    shown.intHomeScore != null && shown.intAwayScore != null &&
+    Number(shown.intHomeScore) + Number(shown.intAwayScore) === 0;
+
+  let scorers;
+
+  if (goalless) {
+    scorers = '<p class="muted">Aucun but dans ce match.</p>';
+  } else if (!timeline.length) {
+    scorers = emptyNote(phase, 'events', failed);
+  } else {
+    scorers = renderScorers(timeline, shown.strHomeTeam, shown.strAwayTeam);
+  }
+
+  const cards = timeline.filter(item =>
+    /yellow|red|card|carton|substitution|replace|remplacement/i
+      .test(`${item.strType || ''} ${eventDescription(item)}`)
+  );
+
+  let cardsHtml;
+
+  if (cards.length) {
+    cardsHtml = renderTimeline(cards);
+  } else if (!timeline.length) {
+    cardsHtml = emptyNote(phase, 'events', failed);
+  } else {
+    cardsHtml =
+      '<p class="muted">Aucun carton ni remplacement dans les événements communiqués.</p>';
+  }
+
+  return `
+    ${section('⚽ Buteurs', scorers)}
+    ${section('📅 Chronologie des événements',
+      timeline.length ? renderTimeline(timeline) : emptyNote(phase, 'events', failed))}
+    ${section('🟨 Cartons et remplacements', cardsHtml)}
+  `;
+}
+
+/* ---------- Classement ---------- */
+
+function formDots(form) {
+  const colors = { W: '#22d795', D: '#ffc857', L: '#ff6574' };
+
+  return String(form || '').split('').map(c => `
+    <span style="display:inline-block;width:8px;height:8px;border-radius:2px;
+      margin-right:2px;background:${colors[c] || '#53647c'}"></span>
+  `).join('');
+}
+
+function renderStandings(data, e) {
+  const groups = Array.isArray(data?.groups) ? data.groups : [];
+
+  if (!groups.length || !groups[0]?.length) {
+    return '<p class="muted">Classement non communiqué pour cette compétition.</p>';
+  }
+
+  return groups.map(rows => `
+    ${rows[0]?.group ? `<h4>${safe(rows[0].group)}</h4>` : ''}
+    <div class="standings">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th style="text-align:left">Équipe</th>
+            <th>Pts</th><th>MJ</th><th>V</th><th>N</th><th>D</th>
+            <th>BM</th><th>BE</th><th>Diff</th><th>Forme</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => {
+            const mine =
+              r.team?.id === e.intHomeId || r.team?.id === e.intAwayId;
+
+            return `
+              <tr class="${mine ? 'highlight' : ''}">
+                <td>${safe(r.rank)}</td>
+                <td style="text-align:left;white-space:nowrap">${safe(r.team?.name)}</td>
+                <td><strong>${safe(r.points)}</strong></td>
+                <td>${safe(r.all?.played)}</td>
+                <td>${safe(r.all?.win)}</td>
+                <td>${safe(r.all?.draw)}</td>
+                <td>${safe(r.all?.lose)}</td>
+                <td>${safe(r.all?.goals?.for)}</td>
+                <td>${safe(r.all?.goals?.against)}</td>
+                <td>${safe(r.goalsDiff)}</td>
+                <td style="white-space:nowrap">${formDots(r.form)}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `).join('');
+}
+
+async function loadStandings(e, key) {
+  state.standings[key] = { loading: true };
+
+  try {
+    const response = await fetch(
+      `/api/football?standings=1&league=${encodeURIComponent(e.intLeagueId)}` +
+      `&season=${encodeURIComponent(e.intSeason)}`
+    );
+
+    let data = {};
+
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Classement indisponible');
+    }
+
+    state.standings[key] = { data };
+
+  } catch (error) {
+    state.standings[key] = {
+      error: error instanceof TypeError
+        ? 'Connexion impossible.'
+        : (error.message || 'Classement indisponible'),
+      at: Date.now()
+    };
+  }
+
+  /* Si ce match est toujours affiché sur l'onglet Classement, on actualise */
+  if (state.view?.e === e && state.tab === 'classement') {
+    renderDetail();
+  }
+}
+
+function standingsTab(e) {
+  if (!e.intLeagueId || !e.intSeason) {
+    return '<p class="muted">Classement indisponible : compétition ou saison non communiquée.</p>';
+  }
+
+  const key = `${e.intLeagueId}-${e.intSeason}`;
+  let entry = state.standings[key];
+
+  /* Une erreur est retentée après une minute */
+  if (entry?.error && Date.now() - entry.at > 60000) {
+    delete state.standings[key];
+    entry = undefined;
+  }
+
+  if (!entry) {
+    loadStandings(e, key);
+    return '<p class="muted">Chargement du classement…</p>';
+  }
+
+  if (entry.loading) return '<p class="muted">Chargement du classement…</p>';
+
+  if (entry.error) {
+    return `<p class="muted">Classement indisponible : ${safe(entry.error)}</p>`;
+  }
+
+  return renderStandings(entry.data, e);
+}
+
+/* ---------- Affichage de la fiche ---------- */
+
+const TABS = [
+  ['avant', 'Avant-match'],
+  ['compos', 'Compos'],
+  ['classement', 'Classement'],
+  ['events', 'Événements'],
+  ['stats', 'Stats']
+];
+
+function renderDetail() {
+  const v = state.view;
+  if (!v) return;
+
+  const { e, details, detailError, detailMessage } = v;
+  const shown = details?.event || e;
+  const timeline = details?.timeline || [];
+  const lineup = details?.lineup || [];
+  const statistics = details?.statistics || [];
+  const phase = statusOf(shown);
+  const country = e.strCountry || '';
+
+  let body;
+
+  if (state.tab === 'compos') {
+    body = lineupTab(lineup, phase, detailError);
+  } else if (state.tab === 'classement') {
+    body = standingsTab(e);
+  } else if (state.tab === 'events') {
+    body = eventsTab(shown, timeline, phase, detailError);
+  } else if (state.tab === 'stats') {
+    body = statistics.length
+      ? renderStatistics(statistics)
+      : emptyNote(phase, 'stats', detailError);
+  } else {
+    body = `
+      <div class="facts">${factsHtml(shown, e)}</div>
+      <p class="muted" style="margin-top:16px">
+        Les probabilités, pronostics et cotes ne sont pas encore proposés
+        dans PREDICT XI : rien n'est inventé.
+      </p>
+    `;
+  }
+
+  const sourceLabel = e._partial
+    ? 'Sources de secours (incomplètes)'
+    : (details?.source || e.source || 'API-Football');
+
+  const tabsBar = TABS.map(([key, label]) => `
+    <button type="button" data-tab="${key}"
+      class="${state.tab === key ? 'active' : ''}">${label}</button>
+  `).join('');
+
+  const keepScroll = $('#detail').scrollTop;
+
+  $('#detail').innerHTML = `
+    ${BACK_BUTTON}
+
+    <p class="eyebrow">
+      ${flag(country)} ${safe(country)} · ${safe(e.strLeague || 'Football')}
+    </p>
+
+    ${headerHtml(e, shown, phase)}
+
+    <div class="match-tabs"
+      style="position:sticky;top:46px;z-index:2;background:#080e19">
+      ${tabsBar}
+    </div>
+
+    ${body}
+
+    <p class="muted" style="margin-top:22px">
+      Source : ${safe(sourceLabel)}
+      ${detailError ? ` · ${safe(detailMessage || 'La récupération des détails a échoué.')}` : ''}
+      ${!detailError && detailMessage ? ` · ${safe(detailMessage)}` : ''}
+      ${details?.warning ? ` · ⚠️ ${safe(details.warning)}` : ''}
+    </p>
+  `;
+
+  $('#detail').scrollTop = keepScroll;
+}
 
 async function detail(id) {
   const e = state.events.find(x => String(x.idEvent) === String(id));
   if (!e) return;
 
-  const country = e.strCountry || '';
+  const token = ++detailToken;
 
-  $('#detail').classList.remove('hidden');
+  showDetailPanel();
 
   $('#detail').innerHTML = `
-    <button class="back" id="closeDetail">← Retour aux matchs</button>
+    ${BACK_BUTTON}
     <h3>Chargement des détails du match...</h3>
     <p class="muted">Recherche des événements et statistiques disponibles.</p>
   `;
-
-  $('#detail').scrollIntoView({
-    behavior: 'smooth',
-    block: 'start'
-  });
-
-  $('#closeDetail').addEventListener('click', () => {
-    $('#detail').classList.add('hidden');
-  });
 
   let details = null;
   let detailError = false;
   let detailMessage = '';
 
+  const phase0 = statusOf(e);
+  const kickoff = kickoffMs(e);
+
+  const tooEarly =
+    phase0 === 'upcoming' &&
+    kickoff !== null &&
+    kickoff - Date.now() > TOO_EARLY_MS;
+
+  const mem = state.details[id];
+  const memOk = mem && (mem.final || Date.now() - mem.at < 180000);
+
   if (e._partial) {
     /* Match venu d'une source de secours : on n'utilise pas le quota API */
     detailMessage =
       'Détails indisponibles pour les matchs des sources de secours.';
-  } else if (state.details[id]) {
-    details = state.details[id];
+  } else if (phase0 === 'postponed') {
+    detailMessage = 'Match reporté : aucune donnée supplémentaire.';
+  } else if (tooEarly) {
+    detailMessage =
+      "Aucune requête envoyée : le match est encore loin, rien n'est disponible. Cela économise votre quota.";
+  } else if (memOk) {
+    details = mem.data;
   } else {
     try {
       const params = new URLSearchParams({
@@ -841,7 +1373,11 @@ async function detail(id) {
 
       /* On garde en mémoire seulement une réponse complète */
       if (details.complete !== false) {
-        state.details[id] = details;
+        state.details[id] = {
+          data: details,
+          at: Date.now(),
+          final: statusOf(details.event || e) === 'finished'
+        };
       }
 
     } catch (error) {
@@ -852,115 +1388,17 @@ async function detail(id) {
     }
   }
 
-  const event = details?.event || e;
-  const timeline = details?.timeline || [];
-  const lineup = details?.lineup || [];
-  const statistics = details?.statistics || [];
+  /* Un autre match a été ouvert entre-temps : on ne touche à rien */
+  if (token !== detailToken) return;
 
-  const scorers = renderScorers(
-    timeline,
-    e.strHomeTeam,
-    e.strAwayTeam
-  );
+  state.view = { e, details, detailError, detailMessage };
 
-  const cardsAndSubs = timeline.filter(item =>
-    /yellow|red|card|carton|substitution|replace|remplacement/i
-      .test(`${item.strType || ''} ${eventDescription(item)}`)
-  );
+  const phase = statusOf(details?.event || e);
 
-  const homeTeam = e.strHomeTeam || event.strHomeTeam;
-  const awayTeam = e.strAwayTeam || event.strAwayTeam;
+  state.tab =
+    phase === 'upcoming' || phase === 'postponed' ? 'avant' : 'events';
 
-  const sourceLabel = e._partial
-    ? 'Sources de secours (incomplètes)'
-    : (details?.source || e.source || 'API-Football');
-
-  $('#detail').innerHTML = `
-    <button class="back" id="closeDetail">← Retour aux matchs</button>
-
-    <p class="eyebrow">
-      ${flag(country)} ${safe(country)} · ${safe(e.strLeague || 'Football')}
-    </p>
-
-    <div style="display:flex;justify-content:space-around;
-      align-items:center;gap:8px;text-align:center;margin:20px 0">
-
-      ${teamCard(homeTeam, e.strHomeTeamBadge || event.strHomeTeamBadge)}
-
-      <div>
-        <h2>${scoreOf(e)}</h2>
-        <small>${statusLabel(e)}</small>
-      </div>
-
-      ${teamCard(awayTeam, e.strAwayTeamBadge || event.strAwayTeamBadge)}
-    </div>
-
-    <div class="facts">
-      <div class="fact">
-        <small>Date</small>
-        ${safe(e.dateEvent || state.date)}
-      </div>
-
-      <div class="fact">
-        <small>Heure</small>
-        ${eventTime(e)}
-      </div>
-
-      <div class="fact">
-        <small>Stade</small>
-        ${safe(event.strVenue || e.strVenue || 'Non communiqué')}
-      </div>
-
-      <div class="fact">
-        <small>Statut</small>
-        ${statusLabel(e)}
-      </div>
-    </div>
-
-    ${section('⚽ Buteurs', scorers)}
-
-    ${section(
-      '📅 Chronologie des événements',
-      renderTimeline(timeline)
-    )}
-
-    ${section(
-      '🟨 Cartons et remplacements',
-      cardsAndSubs.length
-        ? renderTimeline(cardsAndSubs)
-        : '<p class="muted">Aucune information disponible.</p>'
-    )}
-
-    ${section(
-      '👥 Compositions des équipes',
-      renderLineup(lineup)
-    )}
-
-    ${section(
-      '📊 Statistiques du match',
-      renderStatistics(statistics)
-    )}
-
-    ${section(
-      '🧠 Analyse PREDICT XI',
-      `<p class="muted">
-        Les événements et statistiques disponibles sont présentés ci-dessus.
-        Une analyse tactique et des conclusions automatiques seront ajoutées
-        dans une prochaine évolution. Aucune donnée manquante n'est inventée.
-      </p>`
-    )}
-
-    <p class="muted">
-      Source : ${safe(sourceLabel)}
-      ${detailError ? ` · ${safe(detailMessage || 'La récupération des détails a échoué.')}` : ''}
-      ${!detailError && detailMessage ? ` · ${safe(detailMessage)}` : ''}
-      ${details?.warning ? ` · ⚠️ ${safe(details.warning)}` : ''}
-    </p>
-  `;
-
-  $('#closeDetail').addEventListener('click', () => {
-    $('#detail').classList.add('hidden');
-  });
+  renderDetail();
 }
 
 /* NAVIGATION ENTRE LES DATES */
@@ -1008,6 +1446,22 @@ $('#matches').addEventListener('click', event => {
 
   const row = event.target.closest('.match');
   if (row) detail(row.dataset.id);
+});
+
+/* Un seul écouteur pour la fiche : retour et onglets */
+$('#detail').addEventListener('click', event => {
+  if (event.target.closest('#closeDetail')) {
+    hideDetailPanel();
+    return;
+  }
+
+  const tab = event.target.closest('[data-tab]');
+
+  if (tab) {
+    state.tab = tab.dataset.tab;
+    renderDetail();
+    $('#detail').scrollTop = 0;
+  }
 });
 
 $('#search').addEventListener('input', render);
