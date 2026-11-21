@@ -155,6 +155,7 @@ async function fixturesQuery(path, key) {
 }
 
 function normalizeFixture(item, tz = "UTC") {
+  const { events: _e, lineups: _l, statistics: _s, players: _p, ...lightItem } = item;
   const fixture = item.fixture || {};
   const league = item.league || {};
   const home = item.teams?.home || {};
@@ -191,7 +192,7 @@ function normalizeFixture(item, tz = "UTC") {
     extratime: item.score?.extratime || null,
     penalty: item.score?.penalty || null,
     source: "API-Football",
-    raw: item
+    raw: lightItem
   };
 }
 
@@ -285,11 +286,22 @@ async function findFixture(params, key) {
 async function matchDetails(fixture, key) {
   const id = fixture.fixture.id;
 
-  const results = await Promise.allSettled([
-    apiFootball(`/fixtures/events?fixture=${id}`, key),
-    apiFootball(`/fixtures/lineups?fixture=${id}`, key),
-    apiFootball(`/fixtures/statistics?fixture=${id}`, key)
-  ]);
+  /* Si la réponse du match contient déjà les événements, compositions ou
+     statistiques, on les réutilise : cela évite des requêtes (quota).
+     Sinon, on les demande séparément comme avant. */
+  const wanted = [
+    ["events", `/fixtures/events?fixture=${id}`],
+    ["lineups", `/fixtures/lineups?fixture=${id}`],
+    ["statistics", `/fixtures/statistics?fixture=${id}`]
+  ];
+
+  const results = await Promise.allSettled(
+    wanted.map(([name, path]) =>
+      Array.isArray(fixture[name])
+        ? Promise.resolve(fixture[name])
+        : apiFootball(path, key)
+    )
+  );
 
   const timeline =
     results[0].status === "fulfilled" ? results[0].value : [];
@@ -584,6 +596,7 @@ export async function onRequestGet({ request, env }) {
     return errorResponse(error);
   }
 }
+
 
 
 
