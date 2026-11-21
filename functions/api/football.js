@@ -9,6 +9,8 @@ const TODAY_TTL = 600;        // aujourd'hui : 10 minutes
 const FUTURE_TTL = 10800;     // dates à venir : 3 heures
 const LIVE_DETAIL_TTL = 120;  // match en direct : 2 minutes
 const UPCOMING_DETAIL_TTL = 1800; // match à venir : 30 minutes
+const NEAR_KICKOFF_TTL = 300;     // match dans moins de 3 h : 5 minutes
+const STANDINGS_TTL = 21600;      // classement : 6 heures
 
 const normalize = (value = "") =>
   String(value)
@@ -87,6 +89,13 @@ function detailIsFresh(entry) {
 
   if (FINISHED.includes(short)) return true;
   if (LIVE.includes(short)) return age < LIVE_DETAIL_TTL;
+
+  const start = Date.parse(entry.data?.event?.isoDate || "");
+
+  if (!Number.isNaN(start) && start - Date.now() < 3 * 3600 * 1000) {
+    return age < NEAR_KICKOFF_TTL;
+  }
+
   return age < UPCOMING_DETAIL_TTL;
 }
 
@@ -127,7 +136,25 @@ async function apiFootball(path, key) {
   return data.response || [];
 }
 
-function normalizeFixture(item) {
+/* Demande les matchs en heure de Brazzaville.
+   Si l'API refuse le fuseau, on retombe sur l'heure universelle (tz = "UTC"). */
+async function fixturesQuery(path, key) {
+  try {
+    const rows = await apiFootball(
+      `${path}&timezone=${encodeURIComponent(TZ)}`,
+      key
+    );
+    return { rows, tz: TZ };
+  } catch (error) {
+    if (error.kind === "api" && /timezone/i.test(error.message)) {
+      const rows = await apiFootball(path, key);
+      return { rows, tz: "UTC" };
+    }
+    throw error;
+  }
+}
+
+function normalizeFixture(item, tz = "UTC") {
   const fixture = item.fixture || {};
   const league = item.league || {};
   const home = item.teams?.home || {};
@@ -150,6 +177,19 @@ function normalizeFixture(item) {
     strStatus: fixture.status?.long || "",
     strStatusShort: fixture.status?.short || "",
     strVenue: fixture.venue?.name || "",
+    isoDate: fixture.date || "",
+    strTimezone: tz,
+    strRound: league.round || "",
+    strReferee: fixture.referee || "",
+    strCity: fixture.venue?.city || "",
+    intLeagueId: league.id ?? null,
+    intSeason: league.season ?? null,
+    intHomeId: home.id ?? null,
+    intAwayId: away.id ?? null,
+    intElapsed: fixture.status?.elapsed ?? null,
+    halftime: item.score?.halftime || null,
+    extratime: item.score?.extratime || null,
+    penalty: item.score?.penalty || null,
     source: "API-Football",
     raw: item
   };
@@ -201,8 +241,8 @@ async function findFixture(params, key) {
   const id = params.get("eventId");
 
   if (id && /^\d+$/.test(id)) {
-    const result = await apiFootball(`/fixtures?id=${id}`, key);
-    const fixture = result[0] || null;
+    const { rows, tz } = await fixturesQuery(`/fixtures?id=${id}`, key);
+    const fixture = rows[0] || null;
 
     /* Sécurité : l'identifiant doit correspondre aux équipes demandées.
        Les matchs des sources de secours ont d'autres identifiants. */
@@ -218,6 +258,7 @@ async function findFixture(params, key) {
       }
     }
 
+    if (fixture) fixture.__tz = tz;
     return fixture;
   }
 
@@ -227,18 +268,18 @@ async function findFixture(params, key) {
 
   if (!date || !home || !away) return null;
 
-  const fixtures = await apiFootball(
-    `/fixtures?date=${date}`,
-    key
-  );
+  const { rows, tz } = await fixturesQuery(`/fixtures?date=${date}`, key);
 
-  return fixtures.find(item => {
+  const found = rows.find(item => {
     const h = normalize(item.teams?.home?.name || "");
     const a = normalize(item.teams?.away?.name || "");
 
     return (h === home && a === away) ||
            (h === away && a === home);
   }) || null;
+
+  if (found) found.__tz = tz;
+  return found;
 }
 
 async function matchDetails(fixture, key) {
@@ -261,7 +302,7 @@ async function matchDetails(fixture, key) {
 
   const failed = results.filter(r => r.status === "rejected");
   const complete = failed.length === 0;
-  const event = normalizeFixture(fixture);
+  const event = normalizeFixture(fixture, fixture.__tz);
 
   return {
     source: "API-Football",
@@ -310,7 +351,7 @@ function errorResponse(error) {
 
 async function handleDetail(params, key) {
   const id = params.get("eventId");
-  const cacheName = id && /^\d+$/.test(id) ? `detail-${id}` : "";
+  const cacheName = id && /^\d+$/.test(id) ? `detail-v2-${id}` : "";
   const cached = cacheName ? await cacheRead(cacheName) : null;
 
   if (cached && detailIsFresh(cached)) {
@@ -344,7 +385,7 @@ async function handleDetail(params, key) {
 
     /* On ne mémorise que les réponses complètes */
     if (details.complete) {
-      await cacheWrite(`detail-${fixture.fixture.id}`, details);
+      await cacheWrite(`detail-v2-${fixture.fixture.id}`, details);
     } else if (cached) {
       return Response.json({
         ...cached.data,
@@ -381,7 +422,7 @@ async function handleList(date, key) {
     );
   }
 
-  const cacheName = `list-${date}`;
+  const cacheName = `list-v2-${date}`;
   const cached = await cacheRead(cacheName);
 
   if (cached && listIsFresh(cached, date)) {
@@ -393,7 +434,7 @@ async function handleList(date, key) {
   }
 
   try {
-    const fixtures = await apiFootball(
+    const { rows: fixtures, tz } = await fixturesQuery(
       `/fixtures?date=${date}`,
       key
     );
@@ -408,7 +449,7 @@ async function handleList(date, key) {
         sportScore: false,
         theSportsDB: false
       },
-      events: fixtures.map(normalizeFixture)
+      events: fixtures.map(item => normalizeFixture(item, tz))
     };
 
     await cacheWrite(cacheName, body);
@@ -460,6 +501,61 @@ async function handleList(date, key) {
   }
 }
 
+async function handleStandings(params, key) {
+  const league = params.get("league") || "";
+  const season = params.get("season") || "";
+
+  if (!/^\d+$/.test(league) || !/^\d{4}$/.test(season)) {
+    return Response.json(
+      { message: "Paramètres de classement invalides." },
+      { status: 400 }
+    );
+  }
+
+  const cacheName = `standings-v2-${league}-${season}`;
+  const cached = await cacheRead(cacheName);
+
+  if (cached && (Date.now() - cached.savedAt) / 1000 < STANDINGS_TTL) {
+    return Response.json({
+      ...cached.data,
+      cacheStatus: "cache",
+      savedAt: cached.savedAt
+    });
+  }
+
+  try {
+    const rows = await apiFootball(
+      `/standings?league=${league}&season=${season}`,
+      key
+    );
+
+    const body = {
+      source: "API-Football",
+      league: rows[0]?.league?.name || "",
+      groups: rows[0]?.league?.standings || []
+    };
+
+    await cacheWrite(cacheName, body);
+
+    return Response.json({
+      ...body,
+      cacheStatus: "api",
+      savedAt: Date.now()
+    });
+  } catch (error) {
+    if (cached) {
+      return Response.json({
+        ...cached.data,
+        cacheStatus: "stale",
+        savedAt: cached.savedAt,
+        warning: friendlyMessage(error)
+      });
+    }
+
+    throw error;
+  }
+}
+
 export async function onRequestGet({ request, env }) {
   const params = new URL(request.url).searchParams;
   const date = params.get("date");
@@ -473,6 +569,10 @@ export async function onRequestGet({ request, env }) {
   }
 
   try {
+    if (params.has("standings")) {
+      return await handleStandings(params, key);
+    }
+
     if (params.has("eventId") || (
       params.has("home") && params.has("away") && date
     )) {
@@ -484,5 +584,6 @@ export async function onRequestGet({ request, env }) {
     return errorResponse(error);
   }
 }
+
 
 
