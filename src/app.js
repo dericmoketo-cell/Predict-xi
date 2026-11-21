@@ -1,12 +1,105 @@
-
 const $ = s => document.querySelector(s);
+
+const TZ = 'Africa/Brazzaville';
+
+const dayOf = ms =>
+  new Date(ms).toLocaleDateString('en-CA', { timeZone: TZ });
+
+const hhmm = ms =>
+  new Date(ms).toLocaleTimeString('fr-FR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: TZ
+  });
+
+/* ---------- MÉMOIRE DU TÉLÉPHONE (matchs par date) ---------- */
+
+const STORE_KEY = 'predict-xi-days-v1';
+const MAX_SAVED_DAYS = 6;
+
+function readStore() {
+  try {
+    return JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStore(store) {
+  const dates = Object.keys(store).sort(
+    (a, b) => (store[a].savedAt || 0) - (store[b].savedAt || 0)
+  );
+
+  while (dates.length > MAX_SAVED_DAYS) {
+    delete store[dates.shift()];
+  }
+
+  while (true) {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(store));
+      return;
+    } catch {
+      if (!dates.length) return;
+      delete store[dates.shift()];
+    }
+  }
+}
 
 const state = {
   events: [],
-  date: new Date().toLocaleDateString('en-CA', {
-    timeZone: 'Africa/Brazzaville'
-  })
+  days: readStore(),
+  details: {},
+  date: dayOf(Date.now())
 };
+
+let loadToken = 0;
+
+function saveDay(date, events, savedAt, failedAt = 0) {
+  /* Le champ "raw" est volumineux et inutile : on ne le garde pas */
+  const clean = events.map(({ raw, _partial, ...rest }) => rest);
+
+  state.days[date] = { events: clean, savedAt, failedAt };
+
+  const store = readStore();
+  store[date] = { events: clean, savedAt };
+  writeStore(store);
+}
+
+/* Une copie est "fraîche" : pas besoin de redemander à l'API */
+function dayIsFresh(entry, date) {
+  if (entry.failedAt && Date.now() - entry.failedAt < 120000) return true;
+  if (entry.partial) return false;
+
+  const age = (Date.now() - entry.savedAt) / 1000;
+  const today = dayOf(Date.now());
+
+  if (date < today) return dayOf(entry.savedAt) > date;
+  if (date === today) return age < 600;
+  return age < 10800;
+}
+
+function noticeFor(date, entry, warning) {
+  const n = entry.events.length;
+
+  let text = n
+    ? `${n} rencontre(s) trouvée(s) · ${fmtDate(date)}`
+    : `Aucun match retourné pour le ${fmtDate(date)}.`;
+
+  if (entry.partial) {
+    text += ' · ⚠️ Liste incomplète (source de secours)';
+  } else if (entry.savedAt) {
+    text += ` · mis à jour à ${hhmm(entry.savedAt)}`;
+  }
+
+  if (warning) text += ` · ⚠️ ${warning}`;
+
+  return text;
+}
+
+function setNotice(text, isError = false) {
+  $('#notice').className = isError ? 'notice error' : 'notice';
+  $('#notice').textContent = text;
+}
 
 const fmtDate = d =>
   new Date(`${d}T12:00:00`).toLocaleDateString('fr-FR', {
@@ -96,7 +189,7 @@ function statusOf(e) {
     return 'finished';
   }
 
-  if (/postponed|cancelled|abandoned|suspended/.test(status)) {
+  if (/postponed|cancelled|abandoned|suspended|pst|canc|abd|susp|awd/.test(status)) {
     return 'postponed';
   }
 
@@ -369,38 +462,110 @@ function renderScorers(items, homeName, awayName) {
   }).join('');
 }
 
-/* CHARGEMENT DES MATCHS */
+/* CHARGEMENT DES MATCHS (avec mémoire par date) */
 
 async function load() {
-  $('#matchDate').value = state.date;
-  $('#notice').className = 'notice';
-  $('#notice').textContent = 'Chargement des rencontres...';
-  $('#matches').innerHTML = '';
+  const date = state.date;
+  const token = ++loadToken;
+
+  $('#matchDate').value = date;
   $('#detail').classList.add('hidden');
+
+  const cached = state.days[date];
+
+  if (cached) {
+    /* On affiche tout de suite ce qu'on a déjà : rien ne disparaît */
+    state.events = cached.events;
+    render();
+
+    if (dayIsFresh(cached, date)) {
+      setNotice(noticeFor(date, cached, ''));
+      return;
+    }
+
+    setNotice(`${noticeFor(date, cached, '')} · actualisation…`);
+  } else {
+    state.events = [];
+    $('#matches').innerHTML = '';
+    setNotice('Chargement des rencontres...');
+  }
 
   try {
     const response = await fetch(
-      `/api/football?date=${encodeURIComponent(state.date)}`
+      `/api/football?date=${encodeURIComponent(date)}`
     );
 
-    const data = await response.json();
+    let data = {};
 
-    if (!response.ok) {
-      throw new Error(data.message || data.error || 'Source temporairement indisponible');
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
     }
 
-    state.events = Array.isArray(data.events) ? data.events : [];
+    if (!response.ok) {
+      throw new Error(
+        data.message || data.error || 'Source temporairement indisponible'
+      );
+    }
 
+    const incoming = Array.isArray(data.events) ? data.events : [];
+    const previous = state.days[date];
+    const hasGoodPrevious =
+      previous && !previous.partial && previous.events.length > 0;
+
+    let warning = data.warning || '';
+
+    if (data.partial === true) {
+      if (hasGoodPrevious) {
+        /* Liste incomplète : on garde la bonne liste déjà chargée */
+        state.days[date] = { ...previous, failedAt: Date.now() };
+        warning = warning ||
+          'Liste incomplète reçue : les matchs déjà chargés sont conservés.';
+      } else {
+        state.days[date] = {
+          events: incoming.map(e => ({ ...e, _partial: true })),
+          savedAt: data.savedAt || Date.now(),
+          partial: true,
+          failedAt: Date.now()
+        };
+      }
+    } else if (!incoming.length && hasGoodPrevious) {
+      state.days[date] = { ...previous, failedAt: Date.now() };
+      warning =
+        'La source a renvoyé 0 match : les matchs déjà chargés sont conservés.';
+    } else {
+      saveDay(
+        date,
+        incoming,
+        data.savedAt || Date.now(),
+        data.warning ? Date.now() : 0
+      );
+    }
+
+    if (token !== loadToken) return;
+
+    state.events = state.days[date].events;
     render();
-
-    $('#notice').textContent = state.events.length
-      ? `${state.events.length} rencontre(s) trouvée(s) · ${fmtDate(state.date)}`
-      : `Aucun match retourné pour le ${fmtDate(state.date)}.`;
+    setNotice(noticeFor(date, state.days[date], warning));
 
   } catch (error) {
-    $('#notice').className = 'notice error';
-    $('#notice').textContent =
-      `Impossible de charger les matchs : ${error.message}. Réessaie.`;
+    if (token !== loadToken) return;
+
+    const current = state.days[date];
+
+    if (current) {
+      /* On garde l'affichage et on évite de redemander trop vite */
+      state.days[date] = { ...current, failedAt: Date.now() };
+      setNotice(
+        `${noticeFor(date, current, '')} · ⚠️ ${error.message}`
+      );
+    } else {
+      setNotice(
+        `Impossible de charger les matchs : ${error.message}. Réessaie plus tard.`,
+        true
+      );
+    }
   }
 }
 
@@ -522,33 +687,58 @@ async function detail(id) {
 
   let details = null;
   let detailError = false;
+  let detailMessage = '';
 
-  try {
-    const params = new URLSearchParams({
-      home: e.strHomeTeam || '',
-      away: e.strAwayTeam || '',
-      date: e.dateEvent || state.date
-    });
+  if (e._partial) {
+    /* Match venu d'une source de secours : on n'utilise pas le quota API */
+    detailMessage =
+      'Détails indisponibles pour les matchs des sources de secours.';
+  } else if (state.details[id]) {
+    details = state.details[id];
+  } else {
+    try {
+      const params = new URLSearchParams({
+        home: e.strHomeTeam || '',
+        away: e.strAwayTeam || '',
+        date: e.dateEvent || state.date
+      });
 
-    /* ID du match API-FOOTBALL */
-    if (e.idEvent) {
-      params.set('eventId', e.idEvent);
+      /* ID du match API-FOOTBALL */
+      if (e.idEvent) {
+        params.set('eventId', e.idEvent);
+      }
+
+      const response = await fetch(`/api/football?${params.toString()}`);
+
+      let data = {};
+
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+
+      if (!response.ok) {
+        throw new Error(data.message || 'Détails indisponibles');
+      }
+
+      details = data;
+
+      if (details.error) {
+        throw new Error(details.error);
+      }
+
+      /* On garde en mémoire seulement une réponse complète */
+      if (details.complete !== false) {
+        state.details[id] = details;
+      }
+
+    } catch (error) {
+      detailError = true;
+      detailMessage = error instanceof TypeError
+        ? 'Connexion impossible.'
+        : (error.message || '');
     }
-
-    const response = await fetch(`/api/football?${params.toString()}`);
-
-    if (!response.ok) {
-      throw new Error('Détails indisponibles');
-    }
-
-    details = await response.json();
-
-    if (details.error) {
-      throw new Error(details.error);
-    }
-
-  } catch (error) {
-    detailError = true;
   }
 
   const event = details?.event || e;
@@ -569,6 +759,10 @@ async function detail(id) {
 
   const homeTeam = e.strHomeTeam || event.strHomeTeam;
   const awayTeam = e.strAwayTeam || event.strAwayTeam;
+
+  const sourceLabel = e._partial
+    ? 'Sources de secours (incomplètes)'
+    : (details?.source || e.source || 'API-Football');
 
   $('#detail').innerHTML = `
     <button class="back" id="closeDetail">← Retour aux matchs</button>
@@ -646,9 +840,10 @@ async function detail(id) {
     )}
 
     <p class="muted">
-      Source : ${safe(details?.source || e.source || 'API-Football')}
-      ${detailError ? ' · La récupération des détails a échoué.' : ''}
-      ${details?.error ? ` · ${safe(details.error)}` : ''}
+      Source : ${safe(sourceLabel)}
+      ${detailError ? ` · ${safe(detailMessage || 'La récupération des détails a échoué.')}` : ''}
+      ${!detailError && detailMessage ? ` · ${safe(detailMessage)}` : ''}
+      ${details?.warning ? ` · ⚠️ ${safe(details.warning)}` : ''}
     </p>
   `;
 
@@ -670,9 +865,7 @@ $('#prevDay').addEventListener('click', () => shift(-1));
 $('#nextDay').addEventListener('click', () => shift(1));
 
 $('#today').addEventListener('click', () => {
-  state.date = new Date().toLocaleDateString('en-CA', {
-    timeZone: 'Africa/Brazzaville'
-  });
+  state.date = dayOf(Date.now());
 
   load();
 });
@@ -698,5 +891,6 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   });
 }
+
 
 
